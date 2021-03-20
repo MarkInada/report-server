@@ -1,0 +1,3 @@
+python-redmine == 2.3.0
+flask == 1.1.2
+jpholiday == 0.1.5
