@@ -266,6 +266,8 @@ def after_request(response):
 
 @app.route('/ping', methods=['GET'])
 def ping():
+    app.logger.info("ping")
+    app.logger.info(settings.REDIS_URL)
     status = 200
     return flask.Response(response='pong\n', status=status, mimetype='application/json')
 
