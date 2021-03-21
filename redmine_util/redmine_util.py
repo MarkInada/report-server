@@ -1,4 +1,5 @@
 from redminelib import Redmine
+import multiprocessing
 from multiprocessing import Pool
 import datetime
 
@@ -18,20 +19,29 @@ class Rissues:
         doing_issues = []
         changed_issues = []
         issue_list = []
-        limit_interval = self.count // PROCESS_NUMBER
-        for num in range(PROCESS_NUMBER-1):
-            issue_list.append(self.redmine.issue.all(sort='priority:desc,due_date:desc', limit = limit_interval, offset = limit_interval * num))
+
+        # check if we can do multiprocessing
+        process = multiprocessing.current_process()
+        if process.daemon:
+            issues = self.redmine.issue.all(sort='priority:desc,due_date:desc')
+            doing_issues = [self.getDoingIssues(issues)]
+            if both:
+                changed_issues = [self.getChangedIssues(issues)]
         else:
-            issue_list.append(self.redmine.issue.all(sort='priority:desc,due_date:desc', limit = self.count - (limit_interval * (PROCESS_NUMBER - 1)), offset = limit_interval * (PROCESS_NUMBER - 1)))
-        with Pool(PROCESS_NUMBER) as p:
-            doing_issues = p.map(self.getDoingIssues, issue_list)
-            p.close()
-            p.join()
-        if both:
+            limit_interval = self.count // PROCESS_NUMBER
+            for num in range(PROCESS_NUMBER-1):
+                issue_list.append(self.redmine.issue.all(sort='priority:desc,due_date:desc', limit = limit_interval, offset = limit_interval * num))
+            else:
+                issue_list.append(self.redmine.issue.all(sort='priority:desc,due_date:desc', limit = self.count - (limit_interval * (PROCESS_NUMBER - 1)), offset = limit_interval * (PROCESS_NUMBER - 1)))
             with Pool(PROCESS_NUMBER) as p:
-                changed_issues = p.map(self.getChangedIssues, issue_list)
+                doing_issues = p.map(self.getDoingIssues, issue_list)
                 p.close()
                 p.join()
+            if both:
+                with Pool(PROCESS_NUMBER) as p:
+                    changed_issues = p.map(self.getChangedIssues, issue_list)
+                    p.close()
+                    p.join()
         return doing_issues, changed_issues
 
     def getDoingIssues(self, issues):
