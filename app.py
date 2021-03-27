@@ -21,6 +21,7 @@ from io import BytesIO, StringIO
 # own
 from redmine_util import redmine_util
 from microsoft_util import microsoft_util
+from record_util import record_util
 
 # celery
 from os.path import join, dirname
@@ -59,28 +60,6 @@ celery = make_celery(app)
 WORKING = "working"
 NOTWORKING = "notworking"
 
-class Work:
-    def __init__(self):
-        self.state = NOTWORKING
-        self.start = ""
-        self.bearer = ""
-
-    def set(self, job):
-        self.state = job
-        self.start = "9:30"
-
-    def auth(self, token):
-        self.bearer = token
-
-    def begin(self):
-        self.state = WORKING
-        self.start = str(datetime.datetime.now().hour)+":"+str(datetime.datetime.now().minute)
-
-    def end(self):
-        self.state = NOTWORKING
-
-Current = Work()
-
 def isHoliday(data):
     target = datetime.date(int(data[0:4]), int(data[4:6]), int(data[6:8]))
     if target.weekday() >= 5 or jpholiday.is_holiday(target):
@@ -90,9 +69,12 @@ def isHoliday(data):
 
 @celery.task
 def hello_task(data):
-    Current.begin()
-    Current.auth(data['token'])
-    mgraph = microsoft_util.Mgraph(Current.bearer)
+    # db: write hello state
+    db = record_util.RecordDB(settings.MONGO_URL, settings.MONGO_USER, settings.MONGO_PW)
+    result = db.insertRequest(data['email'], WORKING)
+    app.logger.info(result)
+
+    mgraph = microsoft_util.Mgraph(data['token'])
 
     rissues = redmine_util.Rissues(data['redmine_url'], data['redmine_id'], data['redmine_pw'], int(data['redmine_user_id']), app.logger)
     issue_results, _ = rissues.getIssues(False)
@@ -102,7 +84,7 @@ def hello_task(data):
     result += data['department'] + "の" + data['name'] + "です\n\n"
     if not len(data['comment']) == 0:
         result += data['comment'] + "\n\n"
-    result += "【勤務予定】" + Current.start + "～18:30\n\n"
+    result += "【勤務予定】" + str(datetime.datetime.now().hour)+":"+str(datetime.datetime.now().minute) + "～18:30\n\n"
     result += "本日の予定\n"
 
     priority = ""
@@ -145,13 +127,20 @@ def hello_task(data):
     error = mgraph.sendMail(emailtitle, result, data['to_recipients'], data['cc_recipients'])
     if error:
         app.logger.info("ms graph error")
+        result = db.updateResult(data['email'], record_util.STATUS_FAILED)
+        app.logger.info(result)
+    else:
+        result = db.updateResult(data['email'], record_util.STATUS_DONE)
+        app.logger.info(result)
 
 @celery.task
 def goodbye_task(data):
-    Current.set(NOTWORKING)
-    Current.auth(data['token'])
+    # db: write hello state
+    db = record_util.RecordDB(settings.MONGO_URL, settings.MONGO_USER, settings.MONGO_PW)
+    result = db.insertRequest(data['email'], NOTWORKING)
+    app.logger.info(result)
 
-    mgraph = microsoft_util.Mgraph(Current.bearer)
+    mgraph = microsoft_util.Mgraph(data['token'])
 
     rissues = redmine_util.Rissues(data['redmine_url'], data['redmine_id'], data['redmine_pw'], int(data['redmine_user_id']), app.logger)
     doing_issues, changed_issues = rissues.getIssues(True)
@@ -161,7 +150,8 @@ def goodbye_task(data):
     result += data['department'] + "の" + data['name'] + "です\n\n"
     if not len(data['comment']) == 0:
         result += data['comment'] + "\n\n"
-    result += "【勤務実績】" + Current.start + "～" + str(datetime.datetime.now().hour)+":"+str(datetime.datetime.now().minute) + "\n\n"
+    # [TODO] must get 9:30 (start time) from db
+    result += "【勤務実績】" + "9:30" + "～" + str(datetime.datetime.now().hour)+":"+str(datetime.datetime.now().minute) + "\n\n"
     result += "業務\n"
 
     priority = ""
@@ -186,6 +176,8 @@ def goodbye_task(data):
     todayEvents, error = mgraph.getEvents(datetime.date.today()) 
     if error:
         app.logger.info("ms graph error")
+        result = db.updateResult(data['email'], record_util.STATUS_FAILED)
+        app.logger.info(result)
         return
     for evet in todayEvents['value']:
         if data['email'] == evet["organizer"]["emailAddress"]["address"]:
@@ -238,6 +230,8 @@ def goodbye_task(data):
     todayEvents, error = mgraph.getEvents(start) 
     if error:
         app.logger.info("ms graph error")
+        result = db.updateResult(data['email'], record_util.STATUS_FAILED)
+        app.logger.info(result)
         return
     for evet in todayEvents['value']:
         if data['email'] == evet["organizer"]["emailAddress"]["address"]:
@@ -256,6 +250,11 @@ def goodbye_task(data):
     error = mgraph.sendMail(emailtitle, result, data['to_recipients'], data['cc_recipients'])
     if error:
         app.logger.info("ms graph error")
+        result = db.updateResult(data['email'], record_util.STATUS_FAILED)
+        app.logger.info(result)
+    else:
+        result = db.updateResult(data['email'], record_util.STATUS_DONE)
+        app.logger.info(result)
 
 @app.after_request
 def after_request(response):
@@ -267,7 +266,6 @@ def after_request(response):
 @app.route('/ping', methods=['GET'])
 def ping():
     app.logger.info("ping")
-    app.logger.info(settings.REDIS_URL)
     status = 200
     return flask.Response(response='pong\n', status=status, mimetype='application/json')
 
@@ -277,7 +275,12 @@ def init():
     data = flask.request.data.decode('utf-8')
     data = json.loads(data)
     app.logger.info(data['job'])
-    Current.set(data['job'])
+
+    # db: write init data
+    db = record_util.RecordDB(settings.MONGO_URL, settings.MONGO_USER, settings.MONGO_PW)
+    result = db.insertRequest(data['email'], data['job'])
+    app.logger.info(result)
+
     status = 200
     out = StringIO()
     x = '{ "id":' + ' 1, "title": "test' + '" }'
@@ -285,12 +288,22 @@ def init():
     json.dump(resState, out)
     return flask.Response(response=out.getvalue(), status=status, mimetype='application/json')
 
-@app.route('/state', methods=['GET'])
+@app.route('/state', methods=['POST'])
 def state():
     app.logger.info("state")
+    data = flask.request.data.decode('utf-8')
+    data = json.loads(data)
+
+    # db: get last state
+    db = record_util.RecordDB(settings.MONGO_URL, settings.MONGO_USER, settings.MONGO_PW)
+    state, _ = db.getLastStateAndStatus(data['email'])
+    if len(state) == 0:
+        app.logger.info("not registered")
+        state = NOTWORKING
+
     status = 200
     out = StringIO()
-    x = '{ "State":"' + Current.state + '" }'
+    x = '{ "State":"' + state + '" }'
     resState = json.loads(x)
     json.dump(resState, out)
     return flask.Response(response=out.getvalue(), status=status, mimetype='application/json')
@@ -302,8 +315,7 @@ def hello():
     data = flask.request.data.decode('utf-8')
     data = json.loads(data)
 
-    Current.begin()
-
+    # hello task
     result = hello_task.delay(data)
     app.logger.info(result.id)
     app.logger.info(result.ready())
@@ -321,8 +333,7 @@ def goodbye():
     data = flask.request.data.decode('utf-8')
     data = json.loads(data)
 
-    Current.end()
-
+    # goodbye task
     result = goodbye_task.delay(data)
     app.logger.info(result.id)
     app.logger.info(result.ready())
@@ -342,7 +353,6 @@ def parse_args():
 
 if __name__ == '__main__':
     try:
-        Current = Work()
         args = parse_args()
         app.run(host=args.host, port=args.port, debug=True)
     except Exception as e:

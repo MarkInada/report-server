@@ -6,6 +6,10 @@ import base64
 dotenv_path = join(dirname(__file__), '.env')
 load_dotenv(dotenv_path)
 
+MONGO_URL = os.environ.get('MONGO_URL')
+MONGO_USER = os.environ.get('MONGO_USER')
+MONGO_PW = os.environ.get('MONGO_PW')
+
 REDIS_URL = os.environ.get("REDIS_URL")
 
 b64pw = os.environ.get("REDIS_PASS").encode()
